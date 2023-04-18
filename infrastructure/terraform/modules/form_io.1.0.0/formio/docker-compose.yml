@@ -1,0 +1,47 @@
+version: "3.8"
+services:
+  api-server:
+    image: 990189637847.dkr.ecr.us-east-1.amazonaws.com/cdle-famli-d-formio-repo:formio-enterprise-7.4.0
+    restart: always
+    links:
+      - pdf-server
+    volumes:
+      - "./certs:/src/certs:ro"
+    environment:
+      MONGO: ${MONGO}
+      LICENSE_KEY: ${LICENSE_KEY}
+      MONGO_CA: ${MONGO_CA}
+      ADMIN_EMAIL: ${ADMIN_EMAIL}
+      ADMIN_PASS: ${ADMIN_PASS}
+      DEBUG: ${DEBUG}
+      PDF_SERVER: http://pdf-server:4005
+      PORTAL_ENABLED: ${PORTAL_ENABLED}
+      PORT: 3000
+    env_file:
+      - .env
+  pdf-server:
+    image: 990189637847.dkr.ecr.us-east-1.amazonaws.com/cdle-famli-d-formio-repo:pdf-server-3.3.9
+    restart: always
+    ports:
+      - "4005:4005"
+    volumes:
+      - "./certs:/src/certs:ro"
+    environment:
+      MONGO_CA: ${MONGO_CA}
+      LICENSE_KEY: ${LICENSE_KEY}
+      ADMIN_EMAIL: ${ADMIN_EMAIL}
+      ADMIN_PASS: ${ADMIN_PASS}
+      MONGO: ${MONGO}
+      FORMIO_PDF_PORT: 4005
+    env_file:
+      - .env
+  nginx-proxy:
+    image: 990189637847.dkr.ecr.us-east-1.amazonaws.com/cdle-famli-d-formio-repo:nginx-latest
+    restart: always
+    ports:
+      - "80:80"
+    volumes:
+      - "./conf.d:/etc/nginx/conf.d:ro"
+    links:
+      - api-server
+      - pdf-server

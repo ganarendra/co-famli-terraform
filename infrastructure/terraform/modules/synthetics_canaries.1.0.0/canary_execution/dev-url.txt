@@ -1,0 +1,14 @@
+https://web.service.d.cdle.famli.coawsdev.com
+https://base.service.d.cdle.famli.coawsdev.com
+https://correspondence.service.d.cdle.famli.coawsdev.com
+https://communication.service.d.cdle.famli.coawsdev.com
+https://workflow.service.d.cdle.famli.coawsdev.com
+https://eventlogging.service.d.cdle.famli.coawsdev.com
+https://monetary.service.d.cdle.famli.coawsdev.com
+https://intake.service.d.cdle.famli.coawsdev.com
+https://docuedge.service.d.cdle.famli.coawsdev.com
+https://jbpm.service.d.cdle.famli.coawsdev.com
+https://issue.service.d.cdle.famli.coawsdev.com
+https://businessrule.service.d.cdle.famli.coawsdev.com
+https://payment.service.d.cdle.famli.coawsdev.com
+https://batch.service.d.cdle.famli.coawsdev.com

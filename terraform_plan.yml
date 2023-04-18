@@ -1,0 +1,270 @@
+parameters:
+  terraform_version: ''
+  exec_path: ''
+  env_id: ''
+  arti_subpath: ''
+  env_account: ''
+  checkov: ''
+
+steps:
+  # Pull in the terraform modules repo
+  - checkout: git://Infrastructure/cloudteam-terraform-pipeline-modules
+    path: modules
+    condition: eq(variables.use_pipeline_modules_repo, 'true')
+    displayName: 'Import terraform pipeline modules repository'
+  - checkout: self
+    path: src
+    displayName: 'Import self repository'
+
+  # Copy items from terraform modules repo to the expected location
+  - script: |
+      echo "copying contents of modules repo to self repo in infrastructure/terraform/modules/external..."
+      mkdir -p ../src/infrastructure/terraform/modules/external
+      cp -r ../modules/* ../src/infrastructure/terraform/modules/external
+      echo "done."
+
+    condition: eq(variables.use_pipeline_modules_repo, 'true')
+    displayName: 'Copy Modules Repo to Self Repo'
+    name: copy_terraform_modules
+    enabled: true
+    failOnStderr: true
+
+  # Download python script (secure file) for auth and Terraform plan execution
+  - task: DownloadSecureFile@1
+    name: tfExec
+    displayName: 'TFExec'
+    inputs:
+      secureFile: 'oit-infra-aws-pipeline-authv4.py'
+
+  # Download python script (secure file) for assuming aws custom build pipeline role
+  - task: DownloadSecureFile@1
+    name: tfCommands
+    condition: eq(variables.use_custom_build_role, 'true')
+    displayName: 'TFCommands'
+    inputs:
+      secureFile: 'oit-infra-aws-pipeline-commands-authv3.py'
+
+  # Set python version to use
+  - task: UsePythonVersion@0
+    displayName: 'Use Python 3.10'
+    inputs:
+      versionSpec: 3.10
+    enabled: true
+
+  # Install proper Terraform version
+  - task: charleszipp.azure-pipelines-tasks-terraform.azure-pipelines-tasks-terraform-installer.TerraformInstaller@0
+    displayName: Use Terraform Version ${{ parameters.terraform_version }}
+    inputs:
+      terraformVersion: ${{ parameters.terraform_version }}
+
+  # Build auth_data for terraform
+  - script: |
+      echo "building ${{ parameters.env_id }}_auth_data..."
+
+      commercialAuthData='{ "aws_region": "###REGION###", "username": "$(tfplan_user)", "user_pass": "$(tfplan_user_pw)", "client_id": "$(cog_client_id)", "app_secret": "$(cog_app_secret)", "base_url": "$(service_endpointv2)", "api_key": "$(endpoint_k)", "account": "$(account_id)", "build_id": "$(Build.BuildId)", "build_name": "$(Build.DefinitionName)", "azdo_project": "$(System.TeamProject)", "tmp_role_identifier": "$(agency)-$(project)-###ENV###", "build_triggered": "$(Build.RequestedFor)", "role_account": "###ACCOUNT###" }'
+      cloudLabsAuthData='{ "aws_region": "###REGION###", "username": "$(tfplan_user)", "user_pass": "$(tfplan_user_pw)", "client_id": "$(cog_client_id)", "app_secret": "$(cog_app_secret)", "base_url": "$(service_endpointv2)", "api_key": "$(endpoint_k)", "account": "$(account_id)", "build_id": "$(Build.BuildId)", "build_name": "$(Build.DefinitionName)", "azdo_project": "$(System.TeamProject)", "tmp_role_identifier": "$(agency)-$(project)-###ENV###", "build_triggered": "$(Build.RequestedFor)", "role_account": "###ACCOUNT###" }'
+      govCloudAuthData='{ "aws_region": "###REGION###", "username": "$(tfplan_user)", "user_pass": "$(tfplan_user_pw)", "client_id": "$(cog_client_id)", "app_secret": "$(cog_app_secret)", "base_url": "$(service_endpointv2)", "api_key": "$(endpoint_k)", "account": "$(account_id)", "build_id": "$(Build.BuildId)", "build_name": "$(Build.DefinitionName)", "azdo_project": "$(System.TeamProject)", "tmp_role_identifier": "$(agency)-$(project)-###ENV###", "build_triggered": "$(Build.RequestedFor)", "role_account": "###ACCOUNT###" }'
+
+      case $(group_name) in
+        "labs-oit-infra-aws-pipeline-library")
+          echo "using auth_data template for oit_cloud_labs."
+          destination="labs"
+          authData=$cloudLabsAuthData
+          ;;
+        "commercial-oit-infra-aws-pipeline-library")
+          echo "using auth_data template for oit_commercial."
+          destination="commercial"
+          authData=$commercialAuthData
+          ;;
+        "govcloud-oit-infra-aws-pipeline-library")
+          echo "using auth_data template for oit_govcloud."
+          destination="govcloud"
+          authData=$govCloudAuthData
+          ;;
+        *)
+          # the default match - if we are here something is wrong
+          echo "please use a recognized destination for your build."
+          exit 1
+          ;;
+      esac
+
+      # update the region, environment and account information
+      authData=$(echo $authData | sed 's/###REGION###/$(region)/g')
+      authData=$(echo $authData | sed 's/###ENV###/${{ parameters.env_id }}/g')
+      authData=$(echo $authData | sed 's/###ACCOUNT###/${{ parameters.env_account }}/g')
+
+      # these next few commands should be commented out unless debugging
+      echo "generated auth_data for $destination:"
+      echo "$(echo $authData | jq '.')"
+
+      echo "${{ parameters.env_id }}_auth_data is set. ##vso[task.setvariable variable=${{ parameters.env_id }}_auth_data;isSecret=true;isOutput=true;]$authData"
+      echo "tmp_auth_data is set. ##vso[task.setvariable variable=tmp_auth_data;isSecret=true;isOutput=true;]$authData"
+      echo "destination is set. ##vso[task.setvariable variable=destination;isSecret=false;isOutput=true;]$destination"
+
+      echo "done."
+
+    displayName: 'Build auth_data'
+    name: build_auth_data
+    enabled: true
+    failOnStderr: true
+
+  - script: |
+      pip install wheel
+      pip install awscli --upgrade pip
+      pip install boto3
+      pip install awscli --upgrade --user
+      pip install -U checkov
+
+
+    displayName: 'Install Python Dependencies'
+    name: python_deps
+    enabled: true
+    failOnStderr: false
+
+  # Run secure python script, passing in auth data for arg 1, execution path for arg 2
+  - script: |
+      echo "running terraform..."
+      python $(TFExec.secureFilePath) '$(build_auth_data.tmp_auth_data)' '${{ parameters.exec_path }}'
+
+
+    displayName: 'AWS Auth & Terraform Exec Script Execution'
+    name: terraform_plan
+    enabled: true
+    failOnStderr: true
+
+
+  # Run secure python script, passing in auth data for arg 1, execution path for arg 2
+  - script: |
+      echo "checkov running"
+
+      # only run checkov if tfplan.json file exists, otherwise it takes a very long time to fail
+      if [ -f "${{ parameters.exec_path }}/tfplan.json" ]; then
+        echo "running checkov..."
+        # terraform spits out the plan json as a single line - lets reformat it using jq
+        # so that if its used by checkov it can list meaningful line numbers on findings
+        cat ${{ parameters.exec_path }}tfplan.json | jq '.' > ${{ parameters.exec_path }}tfplan-formatted.json
+        # the list of items checkov checks for can be found at
+        # https://github.com/bridgecrewio/checkov/blob/master/docs/5.Policy%20Index/terraform.md
+        checkov -d ${{ parameters.exec_path }} --framework terraform --skip-path tfplan.json --skip-path tfplan-formatted.json --download-external-modules true --skip-check CKV2_AWS_5 --external-checks-dir ${{ parameters.exec_path }}../modules/external/checkov -o junitxml > ${{ parameters.exec_path }}/checkov_root_results.xml
+      else
+        echo "tfplan.json does not exist, not running checkov."
+      fi
+
+      echo "done."
+
+    displayName: 'checkov'
+    name: checkov
+    enabled: ${{ parameters.checkov }}
+    failOnStderr: true
+
+
+
+
+
+
+  - task: PublishTestResults@2
+    displayName: Publish Checkov Terraform Root Results
+    condition: succeededOrFailed()
+    inputs:
+      testResultsFormat: 'JUnit'
+      testResultsFiles: '${{ parameters.exec_path }}/checkov_root_results.xml'
+      searchFolder: '${{ parameters.exec_path }}'
+      mergeTestResults: false
+      testRunTitle: Checkov Terraform Root Scan of ${{ parameters.env_id }}
+      failTaskOnFailedTests: true
+      publishRunAttachments: true
+
+  # Track build information in a file named build_params.json which is used to track key info used in the release pipeline
+  - script: |
+      echo "recording key build parameters for environment ${{ parameters.env_id }}..."
+      # pull out key variables
+      awsRegion=$(echo '$(build_auth_data.tmp_auth_data)' | jq '.aws_region' | tr -d '"')
+      roleAccount=$(echo '$(build_auth_data.tmp_auth_data)' | jq '.role_account')
+      tmpRoleIdentifier=$(echo '$(build_auth_data.tmp_auth_data)' | jq '.tmp_role_identifier')
+
+      # create json of build parameters that can be consumed in release pipeline
+      echo '{' > ${{ parameters.exec_path }}/build_params.json
+      echo '  "terraform_version": "${{ parameters.terraform_version }}",' >> ${{ parameters.exec_path }}/build_params.json
+      echo '  "exec_path": "${{ parameters.exec_path }}",' >> ${{ parameters.exec_path }}/build_params.json
+      echo '  "env_id": "${{ parameters.env_id }}",' >> ${{ parameters.exec_path }}/build_params.json
+      echo "  \"aws_region\": \"$awsRegion\"," >> ${{ parameters.exec_path }}/build_params.json
+      echo "  \"role_account\": $roleAccount," >> ${{ parameters.exec_path }}/build_params.json
+      echo "  \"tmp_role_identifier\": $tmpRoleIdentifier," >> ${{ parameters.exec_path }}/build_params.json
+      echo '  "agency": "$(agency)",' >> ${{ parameters.exec_path }}/build_params.json
+      echo '  "project": "$(project)",' >> ${{ parameters.exec_path }}/build_params.json
+      echo '  "destination": "$(build_auth_data.destination)"' >> ${{ parameters.exec_path }}/build_params.json
+      echo '}' >> ${{ parameters.exec_path }}/build_params.json
+
+      echo "aws region is set. ##vso[task.setvariable variable=${{ parameters.env_id }}_aws_region;isSecret=false;isOutput=true;]$awsRegion"
+
+      # show the build parameters
+      cat ${{ parameters.exec_path }}/build_params.json
+
+      echo "done."
+
+    displayName: 'Track Build Parameters for Release Pipeline'
+    name: record_build_params
+    enabled: true
+    failOnStderr: true
+
+  # Run python script to pull credentials for custom pipeline role, if one exists
+  - script: |
+      echo "gathering custom build pipeline credentials..."
+      roleAccount=$(echo '$(build_auth_data.tmp_auth_data)' | jq '.role_account')
+      strippedRoleAccount=$(echo $roleAccount | tr -d '"')
+
+      # add role_lookup key - this is how the python script determines which role to gather credentials for, and is not already present in auth_data
+      echo '$(build_auth_data.tmp_auth_data)' | jq ". += { \"role_lookup\": \"$strippedRoleAccount-custom-$(agency)-$(project)-build\"}" > role_lookup_add.json
+
+      # modify the tmp_role_identifier so logging makes it obvious it comes from the build pipeline custom role
+      newTmpRole="$(agency)-$(project)-${{ parameters.env_id }}-build-commands"
+      cat role_lookup_add.json | jq ".tmp_role_identifier = \"$newTmpRole\"" > tmp_role_fix.json
+
+      # now run the python script that will collect the credentials
+      python $(TFCommands.secureFilePath) "$(cat tmp_role_fix.json)" > out.txt
+
+      # pull out the credentials from the json response and strip the double quotes off
+      accessKeyID=$(cat out.txt | grep 'AccessKeyId' | awk '{print $2}' | tr -d '",')
+      secretAccessKey=$(cat out.txt | grep 'SecretAccessKey' | awk '{print $2}' | tr -d '",')
+      sessionToken=$(cat out.txt | grep 'SessionToken' | awk '{print $2}' | tr -d '",')
+      expiration=$(cat out.txt | grep 'Expiration' | awk '{print $2}' | tr -d '"')
+
+      # remove the file containing the json response
+      rm out.txt
+
+      echo "the credentials expire at: $expiration"
+
+      # set the credentials as azdo variables that can be used later in the release pipeline
+      echo "access key is set. ##vso[task.setvariable variable=${{ parameters.env_id }}_access_key;isSecret=true;isOutput=true;]$accessKeyID"
+      echo "secret key is set. ##vso[task.setvariable variable=${{ parameters.env_id }}_secret_key;isSecret=true;isOutput=true;]$secretAccessKey"
+      echo "session token is set. ##vso[task.setvariable variable=${{ parameters.env_id }}_session_token;isSecret=true;isOutput=true;]$sessionToken"
+      echo "expiration is set. ##vso[task.setvariable variable=${{ parameters.env_id }}_expiration;isSecret=false;isOutput=true;]$expiration"
+
+      echo "done."
+
+    displayName: 'Gather AWS Credentials for Custom Build Commands'
+    condition: eq(variables.use_custom_build_role, 'true')
+    name: gather_creds
+    enabled: true
+    failOnStderr: true
+
+  - task: DeleteFiles@1
+    inputs:
+      SourceFolder: ${{ parameters.exec_path }}
+      Contents: '.terraform**'
+    displayName: 'Clear ./terraform dir'
+
+  - task: CopyFiles@2
+    displayName: 'Copy Files for Artifact'
+    inputs:
+      SourceFolder: '$(System.DefaultWorkingDirectory)/../src/'
+      Contents: |
+        infrastructure/terraform/modules/**
+        ${{ parameters.arti_subpath }}**
+      TargetFolder: '$(System.DefaultWorkingDirectory)/this_artifact/'
+
+  # Create artifact containing everything relating to the environment
+
+  - publish: '$(System.DefaultWorkingDirectory)/this_artifact/'
+    displayName: 'Create Terraform Artifact - ${{ parameters.env_id }}'
+    artifact: terraform_${{ parameters.env_id }}

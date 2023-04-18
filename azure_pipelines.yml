@@ -1,0 +1,154 @@
+# How to use and modify this pipeline file is covered in a wiki page - https://dev.azure.com/SOC-OIT/Infrastructure/_wiki/wikis/Infrastructure.wiki/4271/Pipeline-Build-Current
+# The corresponding release is also covered in a wiki page - https://dev.azure.com/SOC-OIT/Infrastructure/_wiki/wikis/Infrastructure.wiki/4252/Pipeline-Release-Current
+# Builds failing due to Checkov scans? Refer to the wiki article - https://dev.azure.com/SOC-OIT/Infrastructure/_wiki/wikis/Infrastructure.wiki/2734/Checkov-Scanning
+trigger:
+# - none
+  branches:
+    include:
+      - main
+      - master
+  paths:
+    # include:
+    #   # Trigger build based on changes in Terraform directory
+    #   - infrastructure/terraform/*
+    exclude:
+      - azure_pipelines.yml
+      - README.md
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  # Variable group with shared secret values
+  # These groups are managed via terraform - https://dev.azure.com/SOC-OIT/Infrastructure/_wiki/wikis/Infrastructure.wiki/4941/Terraform-managed-variable-groups
+  # Will be one of: commercial-oit-infra-aws-pipeline-library, govcloud-oit-infra-aws-pipeline-library, or labs-oit-infra-aws-pipeline-library
+  - group: commercial-oit-infra-aws-pipeline-library
+  # Whether to use terraform pipeline modules repo - normally this is needed
+  - name: use_pipeline_modules_repo
+    value: true
+    # Whether to use aws credentials from a custom role with the build - normally not needed
+    # The purpose and how to set the role up is covered in a wiki page - https://dev.azure.com/SOC-OIT/Infrastructure/_wiki/wikis/Infrastructure.wiki/4381/Adding-Custom-AWS-Roles-for-Azure-Devops-Pipelines
+  - name: use_custom_build_role
+    value: false
+  # The AWS region
+  - name: region
+    value: "us-east-1"
+  # The agency name, must match what is in terraform
+  - name: agency
+    value: cdle
+  # The project name, must match what is in terraform
+  - name: project
+    value: famli
+
+parameters:
+# Version matching versions.tf file for the environment(s)
+- name: terraformVersion
+  default: '1.2.7'
+# Input values for each active environment - environmentName, envExecPath, envDestination, envAccount
+# Env basis https://drive.google.com/file/d/1llAoMVPCMnWvCZU4XFi7Mg_hdEAv8T7i/view
+- name: environmentDetail
+  type: object
+  default:
+  - environmentName: 'dev'
+    envExecPath: '$(System.DefaultWorkingDirectory)/../src/infrastructure/terraform/dev/'
+    envAccount: '990189637847'
+    envArtiSubpath: 'infrastructure/terraform/dev/'
+    enable_checkov: 'true'
+  - environmentName: 'dev2'
+    envExecPath: '$(System.DefaultWorkingDirectory)/../src/infrastructure/terraform/dev2/'
+    envAccount: '990189637847'
+    envArtiSubpath: 'infrastructure/terraform/dev2/'
+    enable_checkov: 'true'
+  - environmentName: 'test'
+    envExecPath: '$(System.DefaultWorkingDirectory)/../src/infrastructure/terraform/test/'
+    envAccount: '893400688995'
+    envArtiSubpath: 'infrastructure/terraform/test/'
+    enable_checkov: 'true'
+  - environmentName: 'test2'
+    envExecPath: '$(System.DefaultWorkingDirectory)/../src/infrastructure/terraform/test2/'
+    envAccount: '893400688995'
+    envArtiSubpath: 'infrastructure/terraform/test2/'
+    enable_checkov: 'true'
+  - environmentName: 'uat'
+    envExecPath: '$(System.DefaultWorkingDirectory)/../src/infrastructure/terraform/uat/'
+    envAccount: '893400688995'
+    envArtiSubpath: 'infrastructure/terraform/uat/'
+    enable_checkov: 'true'
+  - environmentName: 'uat2'
+    envExecPath: '$(System.DefaultWorkingDirectory)/../src/infrastructure/terraform/uat2/'
+    envAccount: '893400688995'
+    envArtiSubpath: 'infrastructure/terraform/uat2/'
+    enable_checkov: 'true'
+  # - environmentName: 'staging'
+  #   envExecPath: '$(System.DefaultWorkingDirectory)/../src/infrastructure/terraform/staging/'
+  #   envAccount: '813613195134'
+  #   envArtiSubpath: 'infrastructure/terraform/staging/'
+  # - environmentName: 'prod'
+  #   envExecPath: '$(System.DefaultWorkingDirectory)/../src/infrastructure/terraform/prod/'
+  #   envAccount: '813613195134'
+  #   envArtiSubpath: 'infrastructure/terraform/prod/'
+
+jobs:
+  # Perform terraform plan for each environment
+  - ${{ each environmentObject in parameters.environmentDetail }}:
+    - job: terraform_build_${{ environmentObject.environmentName}}
+      displayName: "Terraform build - ${{ environmentObject.environmentName}}"
+      steps:
+      - template: 'terraform_plan.yml'
+        parameters:
+          terraform_version: ${{ parameters.terraformVersion }}
+          exec_path: ${{ environmentObject.envExecPath }}
+          env_id: ${{ environmentObject.environmentName }}
+          arti_subpath: ${{ environmentObject.envArtiSubpath }}
+          env_account: ${{ environmentObject.envAccount }}
+          checkov: ${{ environmentObject.enable_checkov }}
+
+  # Record environments for which a plan was performed - used in the release
+  - job: record_environments
+    displayName: "Record environments"
+    steps:
+    - script: |
+        # echo "environmentDetail object:"
+        # echo ${ENV_DETAIL_JSON}
+        echo "gathering environmentName from environmentDetail object..."
+        # the following works by taking the JSON which appears as one line string,
+        # putting each word as a separate line,
+        # finding all lines matching "environmentName" and the line immediately after which is the name of the environment,
+        # stripping out all lines with "environmentName",
+        # removing all trailing commas which leaves only the actual environment name values,
+        # and then placing all the environments on a single line delimited with a space, e.g. "dev test prod"
+        echo ${ENV_DETAIL_JSON} | xargs -n1 | sed -n '/environmentName/,+1p' | grep -v environmentName | tr -d ',' | awk '{printf "%s ", $1}' > $(System.DefaultWorkingDirectory)/pipeline_resources/env_list.txt
+        echo "contents of environment list:"
+        cat $(System.DefaultWorkingDirectory)/pipeline_resources/env_list.txt
+      env:
+        ENV_DETAIL_JSON: ${{ convertToJson(parameters.environmentDetail) }}
+    - publish: $(System.DefaultWorkingDirectory)/pipeline_resources/
+      displayName: 'Create Terraform Artifact - pipeline_resources'
+      artifact: 'pipeline_resources'
+
+  # Run custom aws authenticated build commands for each environment
+  # Only runs when variable use_custom_build_role is set to true
+  - ${{ each environmentObject in parameters.environmentDetail }}:
+    - job: custom_build_commands_${{ environmentObject.environmentName }}
+      condition: eq(variables.use_custom_build_role, 'true')
+      dependsOn: terraform_build_${{ environmentObject.environmentName }}
+      variables:
+        access_key: $[ dependencies.terraform_build_${{ environmentObject.environmentName }}.outputs['gather_creds.${{ environmentObject.environmentName }}_access_key'] ]
+        secret_key: $[ dependencies.terraform_build_${{ environmentObject.environmentName }}.outputs['gather_creds.${{ environmentObject.environmentName }}_secret_key'] ]
+        session_token: $[ dependencies.terraform_build_${{ environmentObject.environmentName }}.outputs['gather_creds.${{ environmentObject.environmentName }}_session_token'] ]
+        expiration: $[ dependencies.terraform_build_${{ environmentObject.environmentName }}.outputs['gather_creds.${{ environmentObject.environmentName }}_expiration'] ]
+        aws_region: $[ dependencies.terraform_build_${{ environmentObject.environmentName }}.outputs['record_build_params.${{ environmentObject.environmentName }}_aws_region'] ]
+      displayName: "Custom build commands - ${{ environmentObject.environmentName }}"
+      steps:
+      # Run custom commands
+      - script: |
+          # set up credentials
+          echo "setting up credentials..."
+          export AWS_ACCESS_KEY_ID=$(access_key)
+          export AWS_SECRET_ACCESS_KEY=$(secret_key)
+          export AWS_DEFAULT_REGION=$(aws_region)
+          export AWS_SESSION_TOKEN=$(session_token)
+          echo "credentials are ready - they expire at $(expiration)."
+
+          # insert custom aws authenticated build commands here
+          echo "running custom authenticated build commands..."
+          # aws s3 ls
